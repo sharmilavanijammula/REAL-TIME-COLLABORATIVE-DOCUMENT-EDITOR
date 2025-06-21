@@ -18,3 +18,4 @@ This Collaborative Document Editor is a real-time web application that allows mu
 
 # OUTPUT
 
+![Image](https://github.com/user-attachments/assets/05298357-9478-482b-bacd-5a181365e0ae)
