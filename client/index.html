@@ -1,0 +1,177 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>Real-Time Collaborative Editor</title>
+  <link href="https://cdn.quilljs.com/1.3.6/quill.snow.css" rel="stylesheet">
+  <style>
+    #editor-container {
+      height: 400px;
+    }
+    body {
+      font-family: Arial, sans-serif;
+      margin: 40px;
+      background: #f9f9f9;
+    }
+    .ql-toolbar {
+      background: #fff;
+    }
+  </style>
+  <script src="https://cdn.ckeditor.com/ckeditor5/40.0.0/classic/ckeditor.js"></script>
+
+</head>
+<body>
+  <h2>Real-Time Collaborative Document Editor</h2>
+  <div style="margin-bottom: 16px;">
+    <input type="file" id="fileInput" accept=".txt,.pdf,.docx,.doc,application/msword,application/vnd.openxmlformats-officedocument.wordprocessingml.document,application/pdf" />
+    <button onclick="uploadFile()">Upload Document</button>
+    <span id="uploadStatus" style="margin-left:10px;color:green;"></span>
+  </div>
+  <div id="editor-container"></div>
+
+  <!-- Quill.js -->
+  <script src="https://cdn.quilljs.com/1.3.6/quill.js"></script>
+  <!-- Socket.io -->
+  <script src="https://cdn.socket.io/4.7.5/socket.io.min.js"></script>
+  <!-- pdf.js -->
+  <script src="https://cdnjs.cloudflare.com/ajax/libs/pdf.js/4.2.67/pdf.min.js"></script>
+  <script>
+    // Try to assign the global variable for pdfjsLib
+    if (typeof pdfjsLib !== 'undefined') {
+      window.pdfjsLib = pdfjsLib;
+    }
+    if (window.pdfjsLib) {
+      window.pdfjsLib.GlobalWorkerOptions.workerSrc = 'https://cdnjs.cloudflare.com/ajax/libs/pdf.js/4.2.67/pdf.worker.min.js';
+    } else {
+      console.error('pdfjsLib is not loaded!');
+    }
+  </script>
+  <!-- mammoth.js for docx -->
+  <script src="https://cdnjs.cloudflare.com/ajax/libs/mammoth/1.7.0/mammoth.browser.min.js"></script>
+  <script>
+    const SAVE_INTERVAL_MS = 2000;
+    const documentId = 'default-doc'; // For demo, use a static doc id
+    const socket = io('http://localhost:3001');
+
+    const quill = new Quill('#editor-container', {
+      theme: 'snow',
+    });
+    quill.disable(); // Disable until loaded
+
+    // Load document content
+    socket.emit('get-document', documentId);
+    socket.on('load-document', (content) => {
+      quill.setContents(content);
+      quill.enable();
+    });
+
+    // Send changes
+    quill.on('text-change', (delta, oldDelta, source) => {
+      if (source !== 'user') return;
+      socket.emit('send-changes', delta);
+    });
+
+    // Receive changes
+    socket.on('receive-changes', (delta) => {
+      quill.updateContents(delta);
+    });
+
+    // Auto-save
+    setInterval(() => {
+      socket.emit('save-document', quill.getContents());
+    }, SAVE_INTERVAL_MS);
+
+    function uploadFile() {
+      const input = document.getElementById('fileInput');
+      const status = document.getElementById('uploadStatus');
+      status.textContent = '';
+      if (input.files.length === 0) {
+        status.textContent = 'Please select a file to upload.';
+        return;
+      }
+      const file = input.files[0];
+      const ext = file.name.split('.').pop().toLowerCase();
+      if (ext === 'txt') {
+        const reader = new FileReader();
+        reader.onload = function(e) {
+          const text = e.target.result;
+          const delta = quill.clipboard.convert(text);
+          quill.setContents(delta);
+          socket.emit('save-document', quill.getContents());
+          status.textContent = 'Text file uploaded!';
+          setTimeout(() => { status.textContent = ''; }, 2000);
+        };
+        reader.onerror = function() {
+          status.textContent = 'Error reading text file.';
+        };
+        reader.readAsText(file);
+      } else if (ext === 'pdf') {
+        if (!window.pdfjsLib) {
+          status.textContent = 'PDF.js library failed to load.';
+          return;
+        }
+        const reader = new FileReader();
+        reader.onload = async function(e) {
+          try {
+            const typedarray = new Uint8Array(e.target.result);
+            const pdf = await window.pdfjsLib.getDocument({data: typedarray}).promise;
+            let text = '';
+            for (let i = 1; i <= pdf.numPages; i++) {
+              const page = await pdf.getPage(i);
+              const content = await page.getTextContent();
+              text += content.items.map(item => item.str).join(' ') + '\n';
+            }
+            const delta = quill.clipboard.convert(text);
+            quill.setContents(delta);
+            socket.emit('save-document', quill.getContents());
+            status.textContent = 'PDF uploaded!';
+            setTimeout(() => { status.textContent = ''; }, 2000);
+          } catch (err) {
+            status.textContent = 'Error reading PDF: ' + err.message;
+          }
+        };
+        reader.onerror = function() {
+          status.textContent = 'Error reading PDF file.';
+        };
+        reader.readAsArrayBuffer(file);
+      } else if (ext === 'docx' || ext === 'doc') {
+        const reader = new FileReader();
+        reader.onload = function(e) {
+          window.mammoth.extractRawText({arrayBuffer: e.target.result})
+            .then(function(result) {
+              const text = result.value;
+              const delta = quill.clipboard.convert(text);
+              quill.setContents(delta);
+              socket.emit('save-document', quill.getContents());
+              status.textContent = 'Word document uploaded!';
+              setTimeout(() => { status.textContent = ''; }, 2000);
+            })
+            .catch(function(err) {
+              status.textContent = 'Error reading Word file: ' + err.message;
+            });
+        };
+        reader.onerror = function() {
+          status.textContent = 'Error reading Word file.';
+        };
+        reader.readAsArrayBuffer(file);
+      } else {
+        // For any other file type, try to read as text and display a warning
+        const reader = new FileReader();
+        reader.onload = function(e) {
+          const text = e.target.result;
+          const delta = quill.clipboard.convert(text);
+          quill.setContents(delta);
+          socket.emit('save-document', quill.getContents());
+          status.textContent = 'File uploaded as plain text. Some formats may not display correctly.';
+          setTimeout(() => { status.textContent = ''; }, 3000);
+        };
+        reader.onerror = function() {
+          status.textContent = 'Error reading file.';
+        };
+        reader.readAsText(file);
+      }
+    }
+  </script>
+</body>
+</html> 
